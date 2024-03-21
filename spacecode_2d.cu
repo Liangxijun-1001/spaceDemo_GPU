@@ -1470,6 +1470,12 @@ __global__ void toLBGridCoor_from_LBCode_Kernel(LBGridCoor *result, const uint64
   int index = blockIdx.x * blockDim.x + threadIdx.x; // blockIdx表示 block编号  blockDim.x表示block的线程数  threadIdx表示线程编号
   if (index  < size) {
     result[index] = toLBGridCoor_from_LBCode(coorlist[index]);
+    printf("h_borderCoor[%d].coI: %d, \
+            h_borderCoor[%d].coJ: %d,  \
+            h_borderCoor[%d].level: %d \n",
+                 index, result[index].coI,
+                 index, result[index].coJ,
+                 index, result[index].level);
   }
 }
 
@@ -1648,9 +1654,11 @@ __global__ void initSceneDataKernel(LBGridCoor *sceneData, int* wid_I, int *wid_
 __global__ void setBorderLevelsKernel(LBGridCoor* sceneData, LBGridCoor* boder, int borderSize, int *wid_I, int *Imin, int *Jmin) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < borderSize) {
+        printf("setBorderLevelsKernel-sceneData: %d %d %d\n", sceneData[tid].coI, sceneData[tid].coJ, sceneData[tid].level);
         int idx = (int)boder[tid].coI - *Imin + 2;
         int idy = (int)boder[tid].coJ - *Jmin + 2;
         int index = idy * (*wid_I) + idx;
+        printf("---- %d %d %d\n", sceneData[index].coI, sceneData[index].coJ, sceneData[index].level);
 
        // printf("Thread value: %d %d %d %d\n", (int)boder[tid].coI, *Imin ,(int)boder[tid].coJ, *Jmin);
 
@@ -1830,75 +1838,78 @@ vector<uint64> toMultiscaleCodes_fromSinglescaleCodes(vector<uint64> codes)
     return vMcM;
 }
 
+__global__ void toLBCode_from_LBGridCoor_Kernel(uint64* result, LBGridCoor * innercoor, int size, uint32 level) {
+  int idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx < size) {
+      innercoor[idx].level = level;
+      result[idx] = toLBCode_from_LBGridCoor(innercoor[idx]);
+  }
+}
+
 
 vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 level,  vector<uint64> &innerCodes, bool isBresenham, bool ismultiscale)
 {
+  // coorlist大小
   int size = coorlist.size();
   // Device code
   LBPoint *dev_coorlist;
-  cudaMalloc((LBPoint **)&dev_coorlist, size * sizeof(LBPoint));
+  cudaMalloc((LBPoint **)&dev_coorlist, size * sizeof(LBPoint)); // 设备端对应释放资源
   cudaMemcpy(dev_coorlist, coorlist.data(), size * sizeof(LBPoint), cudaMemcpyHostToDevice);
 
-  uint64 *h_vcodes = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64));
-
+  // 这段代码实际DDA算法没有使用
+  uint64 *h_vcodes = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64)); // 主机端对应释放资源
   uint64 *dev_vcodes;
-  cudaMalloc((uint64 **)&dev_vcodes, MAX_MIDCODES * sizeof(uint64));
-
-  // 在设备端分配内存
-  // cudaMalloc((void **)&d_ESPGCode, sizeof(int));
-
-  // // 将主机端的变量值复制到设备端
-  // cudaMemcpy(d_ESPGCode, &ESPGCode, sizeof(int), cudaMemcpyHostToDevice);
+  cudaMalloc((uint64 **)&dev_vcodes, MAX_MIDCODES * sizeof(uint64)); // 设备端对应释放资源
 
   level = min(MAXLEVEL_LB, max(0, level));
 
   // Launch the CUDA kernel
-  int threadsPerBlock = 1024;
+  int threadsPerBlock = 512;
   int numBlocks = (coorlist.size() + threadsPerBlock - 1) / threadsPerBlock;
 
-  printf("numBlocks: %d, threadPerBlock: %d\n", numBlocks, threadsPerBlock);
-
-  uint64 *d_midcodes;
-  // uint64 *d_allcodes;
-
-  uint64 *h_midcodes = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64));
-  // uint64 *h_allcodes = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64));
-
-  cudaMalloc(&d_midcodes, MAX_MIDCODES * sizeof(uint64));
-  cudaMemcpy(d_midcodes, h_midcodes, MAX_MIDCODES * sizeof(uint64), cudaMemcpyHostToDevice);
-
-  // cudaMalloc(&d_allcodes, MAX_MIDCODES * sizeof(uint64));
-  // cudaMemcpy(d_allcodes, h_allcodes, MAX_MIDCODES * sizeof(uint64), cudaMemcpyHostToDevice);
+  //printf("numBlocks: %d, threadPerBlock: %d\n", numBlocks, threadsPerBlock);
 
   uint64 *h_uniformOutput4GPU;
-  h_uniformOutput4GPU = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64));
+  h_uniformOutput4GPU = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64)); // 主机端对应释放资源
   memset(h_uniformOutput4GPU, 0, MAX_MIDCODES * sizeof(uint64));
 
   uint64 *uniformOutput4GPU;
-  cudaMalloc(&uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64));
+  cudaMalloc(&uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64)); // 设备端对应释放资源
   cudaMemcpy(uniformOutput4GPU, h_uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64), cudaMemcpyHostToDevice);
 
-  LBGridCoor *h_borderCoor = (LBGridCoor*) malloc(MAX_MIDCODES * sizeof(LBGridCoor));
+  LBGridCoor *h_borderCoor = (LBGridCoor*) malloc(MAX_MIDCODES * sizeof(LBGridCoor)); // 主机端对应释放资源
 
   LBGridCoor *d_borderCoor;
-
-  cudaMalloc(&d_borderCoor, MAX_MIDCODES *sizeof(LBGridCoor));
+  cudaMalloc(&d_borderCoor, MAX_MIDCODES *sizeof(LBGridCoor)); // 设备端对应释放资源
   cudaMemcpy(d_borderCoor, h_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
 
   uint64 vcodesNum = 0;
 
-  getCodesOfLinesKernel<<<numBlocks, 512, 0, 0>>>(dev_coorlist,
-                                                  size, level, isBresenham,
-                                                  (dev_vcodes),
-                                                  vcodesNum,
-                                                  // d_allcodes,
-                                                  // d_ij_list,
-                                                  uniformOutput4GPU);
+  // 创建CUDA流
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
 
-  cudaDeviceSynchronize();
+  // outputs: uniforOutput4GPU 归一化了数据格式，便于存取
+  getCodesOfLinesKernel<<<numBlocks, threadsPerBlock, 0, stream>>>(dev_coorlist,
+                                                              size,
+                                                              level,
+                                                              isBresenham,
+                                                              (dev_vcodes),
+                                                              vcodesNum,
+                                                              // d_allcodes,
+                                                              // d_ij_list,
+                                                              uniformOutput4GPU);
+
+  cudaStreamSynchronize(stream);
+  cudaStreamDestroy(stream);
+
+  cudaFree(dev_coorlist); // 设备端释放dev_coorlist资源
+  cudaFree(dev_vcodes); // 设备端释放dev_vcodes资源
 
   // 将上一个kernel执行结果uniforOutput4GPU拷贝到host端h_uniformOutput4GPU进行处理，组织成新的 h_boderCodes
   cudaMemcpy(h_uniformOutput4GPU, uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64), cudaMemcpyDeviceToHost);
+
+  cudaFree(uniformOutput4GPU); // 设备端释放uniformOutput4GPU资源
 
   // 循环主机端h_uniformOutput4GPU，组织
   for (int i = 0; i < MAX_MIDCODES; i += 100)
@@ -1909,11 +1920,13 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
     for (int j = 0; j < allcode_count; j++)
     {
       h_vcodes[vcodesNum] = h_uniformOutput4GPU[i + 1 + j];
-      printf("%llu ", h_vcodes[vcodesNum]);
+      //printf("%llu ", h_vcodes[vcodesNum]);
       vcodesNum++;
     }
-    printf("\n");
+    //printf("\n");
   }
+
+  free(h_uniformOutput4GPU); // 主机端释放h_uniformOutput4GPU资源
 
   /******************************在主机端组织好vector<uint64>h_boderCodes并完成处理***********************************/
   std::vector<uint64> h_borderCodes;
@@ -1923,7 +1936,7 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
     //printf("%llu\n", h_borderCodes[i]);
   }
 
-  //uint64 * h_borderCodes = (uint64 *) malloc(sizeof(uint64) * h_borderCodes.size());
+  free(h_vcodes);// 释放h_vcodes资源
 
   bool isSortDeleteSame = true;
   if (isSortDeleteSame)
@@ -1932,29 +1945,19 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   }
 
   uint64 *d_borderCodes;
-  cudaMalloc(&d_borderCodes, sizeof(uint64) * h_borderCodes.size());
+  cudaMalloc(&d_borderCodes, sizeof(uint64) * h_borderCodes.size()); // 设备端资源释放
   cudaMemcpy(d_borderCodes, h_borderCodes.data(), sizeof(uint64) * h_borderCodes.size(), cudaMemcpyHostToDevice);
 
   /**************************************************************************************************************/
+  cudaStream_t stream1;
+  cudaStreamCreate(&stream1);
 
-  toLBGridCoor_from_LBCode_Kernel<<<1, 512, 0, 0>>>(d_borderCoor, d_borderCodes, h_borderCodes.size());
+  numBlocks = (h_borderCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
+  toLBGridCoor_from_LBCode_Kernel<<<numBlocks, threadsPerBlock, 0, stream1>>>(d_borderCoor, d_borderCodes, h_borderCodes.size());
 
-  cudaDeviceSynchronize();
-
-  // cudaMemcpy(h_borderCodes, d_borderCodes, borderCodes.size(), cudaMemcpyDeviceToHost);
-
-  cudaMemcpy(h_borderCoor, d_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyDeviceToHost);
-
-  for (int i = 0; i < h_borderCodes.size(); i++) {
-    printf("h_borderCoor[%d].coI: %d, \
-            h_borderCoor[%d].coJ: %d,  \
-            h_borderCoor[%d].level: %d \n",
-                 i, h_borderCoor[i].coI,
-                 i, h_borderCoor[i].coJ,
-                 i, h_borderCoor[i].level);
-  }
 
   /***********************************ScanLineSeedFill_2D parallelization****************************************/
+
   int h_Imax, h_Imin;
   int h_Jmax, h_Jmin;
   int *d_Imax, *d_Imin;
@@ -1975,9 +1978,25 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   cudaMemcpy(d_Jmin, &h_borderCoor[0].coJ, sizeof(int), cudaMemcpyHostToDevice);
 
   // 计算最大值和最小值
-  int blockSize = 512;
-  int numBlocks1 = (h_borderCodes.size() + blockSize - 1) / blockSize;
-  minMaxKernel<<<numBlocks1, blockSize>>>(d_borderCoor, d_Imin, d_Imax, d_Jmin, d_Jmax, h_borderCodes.size());
+  numBlocks = (h_borderCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
+  minMaxKernel<<<numBlocks, threadsPerBlock, 0, stream1>>>(d_borderCoor, d_Imin, d_Imax, d_Jmin, d_Jmax, h_borderCodes.size());
+
+  // 添加同步点，等待核函数执行完成
+  cudaStreamSynchronize(stream1);
+
+  cudaStreamDestroy(stream1);
+
+  cudaMemcpy(h_borderCoor, d_borderCoor, MAX_MIDCODES *sizeof(LBGridCoor), cudaMemcpyDeviceToHost);
+
+  LBGridCoor *d_borderCoor1;
+  cudaMalloc(&d_borderCoor1, MAX_MIDCODES *sizeof(LBGridCoor));
+
+  cudaError_t error = cudaMemcpy(d_borderCoor1, h_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
+  if (error != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(error));
+  }
+
+  cudaFree(d_borderCoor); //设备端释放d_borderCoor资源
 
   // 将设备（GPU）上的最大最小值复制到主机内存
   cudaMemcpy(&h_Imax, d_Imax, sizeof(int), cudaMemcpyDeviceToHost);
@@ -2010,43 +2029,39 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 
   LBGridCoor *d_SceneData;
   cudaMalloc(&d_SceneData, sizeof(LBGridCoor) * wid_I * wid_J);
-  //cudaMemcpy(d_SceneData, SceneData.data(), sizeof(LBGridCoor) * wid_I * wid_J, cudaMemcpyHostToDevice);
 
-  //int blockSize = 512;
-  int numBlocks2 = (SceneData.size() + blockSize - 1) / blockSize;
-  initSceneDataKernel<<<numBlocks2, blockSize>>>(d_SceneData, d_wid_I, d_wid_J, d_Imin, d_Jmin);
+  cudaStream_t stream2;  // 创建了一个CUDA流 stream2
+  cudaStreamCreate(&stream2);
+  // 计算initSceneDataKernel参数
+  numBlocks = (SceneData.size() + threadsPerBlock - 1) / threadsPerBlock;
+  initSceneDataKernel<<<numBlocks, threadsPerBlock, 0, stream2>>>(d_SceneData,
+                                                                  d_wid_I,
+                                                                  d_wid_J,
+                                                                  d_Imin,
+                                                                  d_Jmin);  // output d_SceneData
 
-  cudaDeviceSynchronize();
+  // 计算setBorderLevelsKernel参数
+  numBlocks = (h_borderCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
+  setBorderLevelsKernel<<<numBlocks, threadsPerBlock, 0, stream2>>>(d_SceneData,
+                                                                    d_borderCoor1,
+                                                                    h_borderCodes.size(),
+                                                                    d_wid_I,
+                                                                    d_Imin,
+                                                                    d_Jmin); // output d_SceneData
+
+  // 添加同步点，等待第二个核函数执行完成
+  cudaStreamSynchronize(stream2);
+
+  // 销毁CUDA流
+  cudaStreamDestroy(stream2);
+
+  cudaFree(d_borderCoor1);
 
   cudaMemcpy(&SceneData[0], d_SceneData, sizeof(LBGridCoor) * wid_I * wid_J, cudaMemcpyDeviceToHost);
 
   // for (int i = 0; i < wid_I * wid_J; i++) {
-  //   printf("^^^^^^ %llu %llu %llu\n", SceneData[i].coI, SceneData[i].coJ, SceneData[i].level);
-  // }
-
-  //int blockSize = 512;
-  int numBlocks3 = (h_borderCodes.size() + blockSize - 1) / blockSize;
-
-  LBGridCoor *d_SceneData1;
-  cudaMalloc(&d_SceneData1, sizeof(LBGridCoor) * wid_I * wid_J);
-
-  cudaMemcpy(d_SceneData1, SceneData.data(), sizeof(LBGridCoor) * wid_I * wid_J, cudaMemcpyHostToDevice);
-
-  LBGridCoor *d_borderCoor1;
-
-  cudaMalloc(&d_borderCoor1, MAX_MIDCODES *sizeof(LBGridCoor));
-  cudaMemcpy(d_borderCoor1, h_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
-
-  setBorderLevelsKernel<<<numBlocks3, blockSize>>>(d_SceneData1, d_borderCoor1, h_borderCodes.size(), d_wid_I, d_Imin, d_Jmin); // output d_SceneData
-
-  cudaDeviceSynchronize();
-
-  cudaMemcpy(&SceneData[0], d_SceneData1, sizeof(LBGridCoor) * wid_I * wid_J, cudaMemcpyDeviceToHost);
-
-  // for (int i = 0; i < wid_I * wid_J; i++) {
   //   printf("********* %llu %llu %llu\n", SceneData[i].coI, SceneData[i].coJ, SceneData[i].level);
   // }
-
 
     vector<LBGridCoor> Stk;
 		LBGridCoor StartPoint;
@@ -2063,7 +2078,7 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 			SceneData[((int)SeedPoint.coJ - h_Jmin + 2) * wid_I + (int)SeedPoint.coI - h_Imin + 2].level = 1;
 
 			int count = FillLineRight2((int)SeedPoint.coI - h_Imin + 2, (int)SeedPoint.coJ - h_Jmin + 2, SceneData, wid_I, wid_J);
-			int xRight = (int)SeedPoint.coI - h_Imin + 2 + count - 1;
+      int xRight = (int)SeedPoint.coI - h_Imin + 2 + count - 1;
 			count = FillLineleft2((int)SeedPoint.coI - 1 - h_Imin + 2, (int)SeedPoint.coJ - h_Jmin + 2, SceneData, wid_I, wid_J);
 			int xLeft = (int)SeedPoint.coI - count - h_Imin + 2;
 
@@ -2075,6 +2090,7 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 
 		uint32 level_LB = h_borderCoor[0].level;
 		for (int i = 0; i < SceneData.size(); i++) {
+      printf("@@@@@@@@@@@@@@@%d\n", SceneData[i].level);
 			if (SceneData[i].level == 0) {
 				LBGridCoor temp_coor;
 				temp_coor.coI = SceneData[i].coI;
@@ -2084,39 +2100,8 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 			}
 		}
 
-    // for (auto & item : inner) {
-    //   std::cout << item.coI << item.coJ << item.level << std::endl;
-    // }
-
-  // LBGridCoor * d_SceneData2;
-  // cudaMalloc(&d_SceneData2, SceneData.size() * sizeof(LBGridCoor));
-  // cudaMemcpy(d_SceneData2, SceneData.data(), sizeof(LBGridCoor) * SceneData.size(), cudaMemcpyHostToDevice);
-
-  // LBGridCoor * h_inner;
-  // h_inner = (LBGridCoor*) malloc(SceneData.size()  * sizeof(LBGridCoor));
-  // LBGridCoor * d_inner;
-  // cudaMalloc(&d_inner, sizeof(LBGridCoor) *  SceneData.size() );
-  // cudaMemcpy(d_inner, h_inner,  sizeof(LBGridCoor) *  SceneData.size() , cudaMemcpyHostToDevice);
-
-  // uint32 level_LB = h_borderCoor[0].level;
-
-  // uint32 inner_size = 0;
-
-  // int numBlocks4 = (SceneData.size() + blockSize - 1) / blockSize;
-  // processSceneData<<<blockSize,numBlocks4>>>(d_SceneData2, SceneData.size(), d_inner, level_LB);
-
-  // cudaDeviceSynchronize();
-
-  // cudaMemcpy(h_inner, d_inner,  210 * sizeof(LBGridCoor), cudaMemcpyDeviceToHost);
-  // printf("&&&&&&&&&&&&&&&&&&&&&&&&&\n");
-  // for (int i = 0; i <  SceneData.size(); i++) {
-  //   printf("%d %d %d \n", h_inner[i].coI, h_inner[i].coJ, h_inner[i].level);
-  // }
-  // printf("&&&&&&&&&&&&&&&&&&&&&&&&&\n");
-
-  cudaFree(d_SceneData);
-  cudaFree(d_SceneData1);
-  //cudaFree(d_SceneData2);
+  free(h_borderCoor); // 主机端释放h_borderCoor资源
+  cudaFree(d_SceneData); // 设备端释放 d_SceneData资源
 
   // 清理内存
   cudaFree(d_Imax);
@@ -2129,29 +2114,28 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   // vector<uint64> innerCodes;
   innerCodes.resize((int)inner.size());
 
-  		if (ismultiscale) {
+  uint64* d_innerCodes;
+  cudaMalloc((void**)&d_innerCodes, innerCodes.size() * sizeof(uint64));
+  LBGridCoor *d_inner;
+  cudaMalloc((void**)&d_inner, sizeof(LBGridCoor)* inner.size());
+  cudaMemcpy(d_inner, inner.data(), inner.size() * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
+
+  numBlocks = (innerCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
+  toLBCode_from_LBGridCoor_Kernel<<<numBlocks, threadsPerBlock, 0, 0>>>(d_innerCodes,
+                                                                          d_inner,
+                                                                          inner.size(), level);
+  cudaDeviceSynchronize();
+  cudaMemcpy(innerCodes.data(), d_innerCodes, sizeof(uint64) * inner.size(), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_innerCodes);
+  cudaFree(d_inner);
+
+
+  if (ismultiscale) {
 			toMultiscaleCodes_fromSinglescaleCodes(h_borderCodes);
 			toMultiscaleCodes_fromSinglescaleCodes(innerCodes);
 		}
 
-
-
-  // // Copy the result back to the host
-  // std::vector<uint64> modifiedData(size);
-  // // cudaMemcpy(modifiedData.data(), dev_vcodes, vcodesNum * sizeof(uint64), cudaMemcpyDeviceToHost);
-  // // thrust::host_vector<uint64> host_vcodes = dev_vcodes;
-
-  // // Sort and remove duplicates (assuming your m_Sort_DeleteSameCodes function does this)
-  // // thrust::sort(host_vcodes.begin(), host_vcodes.end());
-  // // auto last = thrust::unique(host_vcodes.begin(), host_vcodes.end());
-  // // host_vcodes.erase(last, host_vcodes.end());
-
-  // // free(h_midcodes);
-  // // free(h_allcodes);
-  // // cudaFree(d_midcodes);
-  // // cudaFree(d_allcodes);
-  // // cudaFree(d_ESPGCode);
-  cudaFree(d_borderCoor1);
   cudaFree(d_borderCodes);
 
   return h_borderCodes;
