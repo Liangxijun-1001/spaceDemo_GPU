@@ -125,7 +125,7 @@ int main()
 
 	vector<uint64> codelist;
 printf("coorlist size is: %d\n", coorlist.size());
-	codelist = getCodesOfPlygon_fixedlevel(coorlist, levelG, false);
+	codelist = getCodesOfPlygon_fixedlevel(coorlist, levelG, false, num2, num3);
 		 t.time("getCodesOfPlygon_fixedlevel");
 printf("codelist sie id : %d\n", codelist.size());
 	//codelist = getCodesOfPlygon_fixedlevel(h_geopoint, 17,true);

@@ -183,7 +183,7 @@ typedef unsigned int uint32;
 	* @note
 	* @update 2022.09.27
 	*/
-	vector<uint64> /*DLL_API*/ getCodesOfPlygon_fixedlevel(vector<LBPoint> coorlist, uint32 level, bool ismultiscale = true);
+	vector<uint64> /*DLL_API*/ getCodesOfPlygon_fixedlevel(vector<LBPoint> coorlist, uint32 level, bool ismultiscale,  int max_vcodes_num, int max_allcodes_num);
 
 
 	/**Get adaptive level for gridding the polygon

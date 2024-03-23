@@ -1399,7 +1399,8 @@ __device__ void getCodesOfOneLine_ImprovedDDA(LBPoint point1, LBPoint point2,
                                               uint32 level, uint64 &code1,
                                               uint64 *allcodes,
                                               uint64 &allcodeNum,
-                                              uint64 &code2
+                                              uint64 &code2,
+                                              int max_allcodes_num
                                               // LBGridCoor *ij_list
 )
 {
@@ -1437,7 +1438,9 @@ __device__ void getCodesOfOneLine_ImprovedDDA(LBPoint point1, LBPoint point2,
   }
 
   uint64 ij_list_size = 0;
-  LBGridCoor ij_list[100];
+  // LBGridCoor ij_list[100];
+  LBGridCoor *ij_list = (LBGridCoor*) malloc(max_allcodes_num * sizeof(LBGridCoor));
+  
 
   int nx, ny;
   nx = int(maxBound.X - minBound.X);
@@ -1455,6 +1458,7 @@ __device__ void getCodesOfOneLine_ImprovedDDA(LBPoint point1, LBPoint point2,
     allcodes[allcodeNum] = toLBCode_from_LBGridCoor(realcoor);
     allcodeNum++;
   }
+  free(ij_list);
 }
 
 __global__ void modifyArray(int *array, int size)
@@ -1486,7 +1490,8 @@ __global__ void getCodesOfLinesKernel(const LBPoint *coorlist,
                                       uint64 &vcodesNum,
                                       // uint64 *allcodes,
                                       // LBGridCoor *d_ij_list,
-                                      uint64 *uninformOutput4GPU)
+                                      uint64 *uninformOutput4GPU,
+                                      int max_allcodes_num)
 {
   int index = blockIdx.x * blockDim.x + threadIdx.x; // 计算线程的全局索引
 
@@ -1528,19 +1533,19 @@ __global__ void getCodesOfLinesKernel(const LBPoint *coorlist,
       midcodesCount = 0;
       allcodesCount = 0;
       // 调用改进的DDA算法生成线段两端点之间的编码及中间点编码
-      uint64 allcodes[100];
+      uint64 *allcodes = (uint64* )malloc(sizeof(uint64) * max_allcodes_num);
 
-      getCodesOfOneLine_ImprovedDDA(point1, point2, level, code1, allcodes, allcodesCount, code2); // 每个线程计算当前两个点之间的allcodesCount可能不同，所以考虑分开存储
+      getCodesOfOneLine_ImprovedDDA(point1, point2, level, code1, allcodes, allcodesCount, code2,max_allcodes_num); // 每个线程计算当前两个点之间的allcodesCount可能不同，所以考虑分开存储
 
       // uniformOutput4GPU
-      uninformOutput4GPU[index * 100] = allcodesCount;
+      uninformOutput4GPU[index * max_allcodes_num] = allcodesCount;
 
       // 设备端代码 数组之间的拷贝问题
       for (uint64 idx = 0; idx < allcodesCount; idx++)
       {
         // printf("Idx: %llu %llu ", idx, allcodes[idx]);
-        if (index * 100 + idx + 1 < MAX_MIDCODES) {
-          uninformOutput4GPU[index * 100 + idx + 1] = allcodes[idx];
+        if (index * max_allcodes_num + idx + 1 < numPoints * max_allcodes_num + max_allcodes_num) {
+          uninformOutput4GPU[index * max_allcodes_num + idx + 1] = allcodes[idx];
         }
       }
 
@@ -1847,7 +1852,13 @@ __global__ void toLBCode_from_LBGridCoor_Kernel(uint64* result, LBGridCoor * inn
 }
 
 
-vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 level,  vector<uint64> &innerCodes, bool isBresenham, bool ismultiscale)
+vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, 
+                                                uint32 level,  
+                                                vector<uint64> &innerCodes, 
+                                                bool isBresenham, 
+                                                bool ismultiscale,
+                                                int max_vcodes_num,
+                                                int max_allcodes_num)
 {
   // coorlist大小
   int size = coorlist.size();
@@ -1857,9 +1868,9 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   cudaMemcpy(dev_coorlist, coorlist.data(), size * sizeof(LBPoint), cudaMemcpyHostToDevice);
 
   // 这段代码实际DDA算法没有使用
-  uint64 *h_vcodes = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64)); // 主机端对应释放资源
+  uint64 *h_vcodes = (uint64 *)malloc(max_vcodes_num * sizeof(uint64)); // 主机端对应释放资源
   uint64 *dev_vcodes;
-  cudaMalloc((uint64 **)&dev_vcodes, MAX_MIDCODES * sizeof(uint64)); // 设备端对应释放资源
+  cudaMalloc((uint64 **)&dev_vcodes, max_vcodes_num * sizeof(uint64)); // 设备端对应释放资源
 
   level = min(MAXLEVEL_LB, max(0, level));
 
@@ -1870,18 +1881,18 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   //printf("numBlocks: %d, threadPerBlock: %d\n", numBlocks, threadsPerBlock);
 
   uint64 *h_uniformOutput4GPU;
-  h_uniformOutput4GPU = (uint64 *)malloc(MAX_MIDCODES * sizeof(uint64)); // 主机端对应释放资源
-  memset(h_uniformOutput4GPU, 0, MAX_MIDCODES * sizeof(uint64));
+  h_uniformOutput4GPU = (uint64 *)malloc((size + 1) * max_allcodes_num * sizeof(uint64)); // 主机端对应释放资源
+  memset(h_uniformOutput4GPU, 0, (size + 1) * max_allcodes_num  * sizeof(uint64));
 
   uint64 *uniformOutput4GPU;
-  cudaMalloc(&uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64)); // 设备端对应释放资源
-  cudaMemcpy(uniformOutput4GPU, h_uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64), cudaMemcpyHostToDevice);
+  cudaMalloc(&uniformOutput4GPU, (size + 1) * max_allcodes_num  * sizeof(uint64)); // 设备端对应释放资源
+  cudaMemcpy(uniformOutput4GPU, h_uniformOutput4GPU, (size + 1) * max_allcodes_num  * sizeof(uint64), cudaMemcpyHostToDevice);
 
-  LBGridCoor *h_borderCoor = (LBGridCoor*) malloc(MAX_MIDCODES * sizeof(LBGridCoor)); // 主机端对应释放资源
+  LBGridCoor *h_borderCoor = (LBGridCoor*) malloc((size + 1) * max_allcodes_num * sizeof(LBGridCoor)); // 主机端对应释放资源
 
   LBGridCoor *d_borderCoor;
-  cudaMalloc(&d_borderCoor, MAX_MIDCODES *sizeof(LBGridCoor)); // 设备端对应释放资源
-  cudaMemcpy(d_borderCoor, h_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
+  cudaMalloc(&d_borderCoor, (size + 1) * max_allcodes_num  *sizeof(LBGridCoor)); // 设备端对应释放资源
+  cudaMemcpy(d_borderCoor, h_borderCoor, (size + 1) * max_allcodes_num  * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
 
   uint64 vcodesNum = 0;
 
@@ -1898,7 +1909,8 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
                                                               vcodesNum,
                                                               // d_allcodes,
                                                               // d_ij_list,
-                                                              uniformOutput4GPU);
+                                                              uniformOutput4GPU,
+                                                              max_allcodes_num);
 
   cudaStreamSynchronize(stream);
   cudaStreamDestroy(stream);
@@ -1907,12 +1919,12 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   cudaFree(dev_vcodes); // 设备端释放dev_vcodes资源
 
   // 将上一个kernel执行结果uniforOutput4GPU拷贝到host端h_uniformOutput4GPU进行处理，组织成新的 h_boderCodes
-  cudaMemcpy(h_uniformOutput4GPU, uniformOutput4GPU, MAX_MIDCODES * sizeof(uint64), cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_uniformOutput4GPU, uniformOutput4GPU, (size + 1) * max_allcodes_num * sizeof(uint64), cudaMemcpyDeviceToHost);
 
   cudaFree(uniformOutput4GPU); // 设备端释放uniformOutput4GPU资源
 
   // 循环主机端h_uniformOutput4GPU，组织
-  for (int i = 0; i < MAX_MIDCODES; i += 100)
+  for (int i = 0; i < (size + 1) * max_allcodes_num; i += max_allcodes_num)
   {
     int allcode_count = h_uniformOutput4GPU[i];
     if (allcode_count == 0)
@@ -1955,7 +1967,7 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
   numBlocks = (h_borderCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
   toLBGridCoor_from_LBCode_Kernel<<<numBlocks, threadsPerBlock, 0, stream1>>>(d_borderCoor, d_borderCodes, h_borderCodes.size());
 
-
+  cudaDeviceSynchronize();
   /***********************************ScanLineSeedFill_2D parallelization****************************************/
 
   int h_Imax, h_Imin;
@@ -1986,12 +1998,16 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 
   cudaStreamDestroy(stream1);
 
-  cudaMemcpy(h_borderCoor, d_borderCoor, MAX_MIDCODES *sizeof(LBGridCoor), cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_borderCoor, d_borderCoor, (size + 1) * max_allcodes_num *sizeof(LBGridCoor), cudaMemcpyDeviceToHost);
+
+  for (int i =0; i < max_allcodes_num; i++) {
+    printf("333####%d %d %d\n", h_borderCoor[i].coI,h_borderCoor[i].coJ, h_borderCoor[i].level);
+  }
 
   LBGridCoor *d_borderCoor1;
-  cudaMalloc(&d_borderCoor1, MAX_MIDCODES *sizeof(LBGridCoor));
+  cudaMalloc(&d_borderCoor1, (size + 1) * max_allcodes_num *sizeof(LBGridCoor));
 
-  cudaError_t error = cudaMemcpy(d_borderCoor1, h_borderCoor, MAX_MIDCODES * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
+  cudaError_t error = cudaMemcpy(d_borderCoor1, h_borderCoor, (size + 1) * max_allcodes_num * sizeof(LBGridCoor), cudaMemcpyHostToDevice);
   if (error != cudaSuccess) {
     printf("CUDA error: %s\n", cudaGetErrorString(error));
   }
@@ -2039,6 +2055,8 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
                                                                   d_wid_J,
                                                                   d_Imin,
                                                                   d_Jmin);  // output d_SceneData
+
+  cudaStreamSynchronize(stream2);
 
   // 计算setBorderLevelsKernel参数
   numBlocks = (h_borderCodes.size() + threadsPerBlock - 1) / threadsPerBlock;
@@ -2090,7 +2108,6 @@ vector<uint64> getCodesOfLines_fixedlevel_CUDA(vector<LBPoint> coorlist, uint32 
 
 		uint32 level_LB = h_borderCoor[0].level;
 		for (int i = 0; i < SceneData.size(); i++) {
-      printf("@@@@@@@@@@@@@@@%d\n", SceneData[i].level);
 			if (SceneData[i].level == 0) {
 				LBGridCoor temp_coor;
 				temp_coor.coI = SceneData[i].coI;
@@ -2238,7 +2255,9 @@ static void ScanLineSeedFill_2D(vector<LBGridCoor> boder,
 void getCodesOfPlygon_fixedlevel_detail(vector<LBPoint> coorlist, uint32 level,
                                         vector<uint64> &borderCodes,
                                         vector<uint64> &innerCodes,
-                                        bool isBresenham, bool ismultiscale)
+                                        bool isBresenham, bool ismultiscale, 
+                                        int max_vcodes_num,
+                                        int max_allcodes_num)
 {
   vector<uint64> vcodes;
   if (coorlist.size() < 3)
@@ -2260,18 +2279,24 @@ void getCodesOfPlygon_fixedlevel_detail(vector<LBPoint> coorlist, uint32 level,
                                                 level,
                                                 innerCodes,
                                                 isBresenham,
-                                                ismultiscale); // isBresenham=false
+                                                ismultiscale,
+                                                max_vcodes_num,
+                                                max_allcodes_num); // isBresenham=false
 
   return;
 }
 
 vector<uint64> getCodesOfPlygon_fixedlevel(vector<LBPoint> coorlist,
-                                           uint32 level, bool ismultiscale)
+                                           uint32 level, bool ismultiscale, 
+                                           int max_vcodes_num,
+                                           int max_allcodes_num)
 {
   vector<uint64> vcodes;
   vector<uint64> boderCodes, innerCodes;
   getCodesOfPlygon_fixedlevel_detail(coorlist, level, boderCodes, innerCodes,
-                                     false, ismultiscale);
+                                     false, ismultiscale,
+                                      max_vcodes_num,
+                                      max_allcodes_num);
   vcodes.insert(vcodes.end(), boderCodes.begin(), boderCodes.end());
   vcodes.insert(vcodes.end(), innerCodes.begin(), innerCodes.end());
 
